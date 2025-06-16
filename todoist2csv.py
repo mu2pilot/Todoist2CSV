@@ -4,7 +4,8 @@ import re
 
 print("Script started")
 
-API_TOKEN = '0a37e89a4121430b636eb99f20bcd802b5b1ae11'
+import os
+API_TOKEN = os.environ.get("TODOIST_API_TOKEN")
 headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
 # Get all projects first
