@@ -117,6 +117,7 @@ function updateTodoistTasks() {
   // Automatically sort and apply formatting after update
   sortTasks();
   applyTaskConditionalFormatting();
+  hideIdColumns();
 }
 
 // === PUSH CHANGES TO TODOIST (SAFE, WITH PROJECT MOVE) ===
@@ -195,6 +196,49 @@ function onEdit(e) {
   }
 }
 
+// === PROJECT MANAGEMENT FUNCTIONS ===
+function getProjectIdFromName(projectName) {
+  // Fetch all projects
+  var projectsResponse = UrlFetchApp.fetch('https://api.todoist.com/rest/v2/projects', {
+    headers: { 'Authorization': 'Bearer ' + TODOIST_API_TOKEN }
+  });
+  var projects = JSON.parse(projectsResponse.getContentText());
+  
+  // Create name to ID mapping
+  var projectNameToId = {};
+  projects.forEach(function(project) {
+    projectNameToId[project.name.toLowerCase()] = project.id;
+  });
+  
+  // Check if project exists
+  if (projectNameToId[projectName.toLowerCase()]) {
+    return projectNameToId[projectName.toLowerCase()];
+  }
+  
+  // Project doesn't exist, create it
+  var createProjectUrl = 'https://api.todoist.com/rest/v2/projects';
+  var createProjectPayload = JSON.stringify({
+    name: projectName
+  });
+  var createProjectOptions = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'Authorization': 'Bearer ' + TODOIST_API_TOKEN },
+    payload: createProjectPayload,
+    muteHttpExceptions: true
+  };
+  
+  var createResponse = UrlFetchApp.fetch(createProjectUrl, createProjectOptions);
+  if (createResponse.getResponseCode() === 200) {
+    var newProject = JSON.parse(createResponse.getContentText());
+    Logger.log('Created new project: ' + projectName + ' with ID: ' + newProject.id);
+    return newProject.id;
+  } else {
+    Logger.log('Failed to create project: ' + projectName);
+    return null;
+  }
+}
+
 // === MAIN UPDATE FUNCTION: Only update rows changed since last sync ===
 function updateTodoistTaskFromSheet() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
@@ -217,6 +261,10 @@ function updateTodoistTaskFromSheet() {
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
+    // Pad row to header length for safety
+    if (row.length < headers.length) {
+      row = row.concat(Array(headers.length - row.length).fill(''));
+    }
     var lastModified = row[lastModifiedCol];
     Logger.log('Row ' + (i+1) + ' | Last Modified: ' + lastModified);
     var taskId = row[0]; // ID column (A)
@@ -297,7 +345,16 @@ function updateTodoistTaskFromSheet() {
         finalContent = formatUrlToMarkdown(taskLink, taskContent);
       }
       
-      var projectId = row[4];   // Project ID (E)
+      var projectName = row[3];   // Project Name column (D)
+      var projectId = null;
+      if (projectName && projectName.toString().trim() !== '') {
+        projectId = getProjectIdFromName(projectName);
+        if (!projectId) {
+          Logger.log('TaskId: ' + taskId + ' | Failed to get/create project: ' + projectName);
+          continue; // Skip this task if project creation failed
+        }
+      }
+      
       var dueDate = row[5];     // Due Date (F)
       if (dueDate instanceof Date) {
         dueDate = dueDate.getFullYear() + '-' +
@@ -305,12 +362,17 @@ function updateTodoistTaskFromSheet() {
                   ('0' + dueDate.getDate()).slice(-2);
       }
       var dueTime = formatDueTimeCell(row[6]); // Due Time (G)
+      // Label handling using header-based indexing
+      var label1Col = headers.indexOf('Label1');
+      var label2Col = headers.indexOf('Label2');
+      var label3Col = headers.indexOf('Label3');
+      var labelCols = [label1Col, label2Col, label3Col];
       var labels = [];
-      for (var j = 8; j <= 10 && j < row.length; j++) { // Label1, Label2, Label3 (I, J, K)
-        if (row[j] && row[j].toString().trim() !== '') {
-          labels.push(row[j]);
+      labelCols.forEach(function(colIdx) {
+        if (row[colIdx] !== undefined && row[colIdx] !== null && row[colIdx].toString().trim() !== '') {
+          labels.push(row[colIdx]);
         }
-      }
+      });
       var payloadObj = {
         content: finalContent,
         // Priority 4 in the sheet means priority 1 in the API (lowest)
@@ -378,7 +440,7 @@ function updateTodoistTaskFromSheet() {
     Logger.log('Row ' + (i+1) + ' will be updated');
 
     taskId = row[0];      // ID column (A)
-    projectId = row[4];   // Project ID column (E)
+    projectName = row[3];   // Project Name column (D)
     dueDate = row[5];     // Due Date column (F)
     Logger.log('TaskId: ' + taskId + ' | Raw Due Date value: ' + dueDate);
     if (dueDate instanceof Date) {
@@ -392,19 +454,16 @@ function updateTodoistTaskFromSheet() {
     Logger.log('TaskId: ' + taskId + ' | Formatted Due Time: ' + dueTime);
     var uiPriority = row[7];  // Priority column (H)
 
-    // Only try to update labels if the columns exist
-    var labels = [];
-    if (row.length > 8) {
-      for (var j = 8; j <= 10 && j < row.length; j++) { // columns I, J, K (Label1, Label2, Label3)
-        if (row[j] && row[j].toString().trim() !== '') {
-          // Skip numeric labels (IDs) as they need to be converted to names
-          if (isNaN(row[j])) {
-            labels.push(row[j]);
-          }
-        }
+    // Update project if name changed
+    var projectId = null;
+    if (projectName && projectName.toString().trim() !== '') {
+      projectId = getProjectIdFromName(projectName);
+      if (!projectId) {
+        Logger.log('TaskId: ' + taskId + ' | Failed to get/create project: ' + projectName);
+        continue; // Skip this task if project creation failed
       }
     }
-
+    
     // Fetch current project ID from Todoist
     var getTaskUrl = 'https://api.todoist.com/rest/v2/tasks/' + taskId;
     var getTaskOptions = {
@@ -417,8 +476,8 @@ function updateTodoistTaskFromSheet() {
     Logger.log('TaskId: ' + taskId + ' | Current Todoist Project ID: ' + currentProjectId);
     
     var projectIdChanged = false;
-    if (projectId && projectId.toString().trim() !== '' && projectId != currentProjectId) {
-      Logger.log('TaskId: ' + taskId + ' | Project ID is changing from ' + currentProjectId + ' to ' + projectId);
+    if (projectId && projectId != currentProjectId) {
+      Logger.log('TaskId: ' + taskId + ' | Project is changing from ' + currentProjectId + ' to ' + projectId);
       // Step 1: Move project using Sync API
       var syncUrl = 'https://api.todoist.com/sync/v9/sync';
       var syncPayload = JSON.stringify({
@@ -460,6 +519,17 @@ function updateTodoistTaskFromSheet() {
     
     payloadObj.content = finalContent;
     
+    // Label handling using header-based indexing
+    var label1Col = headers.indexOf('Label1');
+    var label2Col = headers.indexOf('Label2');
+    var label3Col = headers.indexOf('Label3');
+    var labelCols = [label1Col, label2Col, label3Col];
+    var labels = [];
+    labelCols.forEach(function(colIdx) {
+      if (row[colIdx] !== undefined && row[colIdx] !== null && row[colIdx].toString().trim() !== '') {
+        labels.push(row[colIdx]);
+      }
+    });
     if (labels.length > 0) {
       payloadObj.labels = labels;
     }
@@ -729,6 +799,9 @@ function applyTaskConditionalFormatting() {
   var priorityCol = headers.indexOf('Priority') + 1;
   var completedCol = headers.indexOf('Completed') + 1;
   var idCol = headers.indexOf('ID') + 1;
+  var projectNameCol = headers.indexOf('Project Name') + 1;
+  var recurringCol = headers.indexOf('Recurring') + 1;
+  var label1Col = headers.indexOf('Label1') + 1;
   Logger.log('Due Date col: ' + dueDateCol + ', Due Time col: ' + dueTimeCol + ', Priority col: ' + priorityCol + ', Completed col: ' + completedCol);
 
   var dueDateLetter = columnToLetter(dueDateCol);
@@ -753,6 +826,12 @@ function applyTaskConditionalFormatting() {
       sheet.autoResizeColumn(col);
     }
   }
+
+  // Center contents for specified columns
+  var columnsToCenter = [projectNameCol, dueDateCol, dueTimeCol, recurringCol, priorityCol, label1Col].filter(function(idx) { return idx > 0; });
+  columnsToCenter.forEach(function(colIdx) {
+    sheet.getRange(2, colIdx, lastRow - 1, 1).setHorizontalAlignment('center');
+  });
 
   var rules = [];
 
@@ -850,4 +929,23 @@ function columnToLetter(column) {
     column = (column - temp - 1) / 26;
   }
   return letter;
+}
+
+// === HIDE ID COLUMNS FUNCTION ===
+function hideIdColumns() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  // Trim header values to avoid issues with extra spaces
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function(h) { return h.trim(); });
+  var taskIdCol = headers.indexOf('ID') + 1; // 1-based index
+  var projectIdCol = headers.indexOf('Project ID') + 1; // 1-based index
+
+  Logger.log('Headers: ' + JSON.stringify(headers));
+  Logger.log('Task ID Col: ' + taskIdCol + ', Project ID Col: ' + projectIdCol);
+
+  if (taskIdCol > 0) {
+    sheet.hideColumn(sheet.getRange(1, taskIdCol));
+  }
+  if (projectIdCol > 0) {
+    sheet.hideColumn(sheet.getRange(1, projectIdCol));
+  }
 }
