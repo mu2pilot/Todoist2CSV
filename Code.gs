@@ -167,11 +167,12 @@ function formatUrlToMarkdown(url, linkText) {
     }
   }
   url = url.toString().trim();
-  if (!url.match(/^https?:\/\//i)) {
+  // Add https:// only if the URL doesn't have a protocol prefix
+  if (!url.match(/^[a-zA-Z]+:\/\//)) {
     url = 'https://' + url;
   }
   // Always use the provided linkText (task name) if present
-  return '[' + (linkText || url.replace(/^https?:\/\//i, '').replace(/\/$/, '')) + '](' + url + ')';
+  return '[' + (linkText || url.replace(/\/$/, '')) + '](' + url + ')';
 }
 
 // === ON EDIT TRIGGER: Automatically update 'Last Modified' column (L) ===
