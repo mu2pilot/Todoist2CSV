@@ -1,7 +1,5 @@
 // === GLOBAL CONFIGURATION ===
-var TODOIST_API_TOKEN_1 = 'afbcef9f4c486c11967c841aacda94512e8f85f2'; // Test Account
-var TODOIST_API_TOKEN_2 = '0a37e89a4121430b636eb99f20bcd802b5b1ae11'; // Active Account
-var TODOIST_API_TOKEN = TODOIST_API_TOKEN_2; // Set which token to use
+var TODOIST_API_TOKEN = PropertiesService.getScriptProperties().getProperty('TODOIST_API_TOKEN');
 
 // === MENU SETUP ===
 function onOpen() {
