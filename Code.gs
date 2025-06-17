@@ -23,7 +23,7 @@ function updateTodoistTasks() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   sheet.clear();
   var rows = [
-    ['ID', 'Task', 'TaskLink', 'Project Name', 'Project ID', 'Due Date', 'Due Time', 'Recurring', 'Priority', 'Label1', 'Label2', 'Label3', 'Completed', 'Last Modified']
+    ['ID', 'Task', 'Note', 'TaskLink', 'Project Name', 'Project ID', 'Due Date', 'Due Time', 'Recurring', 'Priority', 'Label1', 'Label2', 'Label3', 'Completed', 'Last Modified']
   ];
 
   // Fetch projects for project name mapping
@@ -89,6 +89,7 @@ function updateTodoistTasks() {
     rows.push([
       task.id,
       taskVisible,
+      task.description || '', // Note column between Task and TaskLink
       taskLink,
       projectDict[task.project_id] || '',
       task.project_id,
@@ -187,14 +188,14 @@ function onEdit(e) {
   Logger.log('Row: ' + e.range.getRow());
   
   var sheet = e.range.getSheet();
-  var colToWatch = [1,2,3,4,5,6,7,8,9,10,11,12,13]; // columns A-M (1-based)
-  var lastModifiedCol = 14; // column N (1-based index)
+  var colToWatch = [1,2,3,4,5,6,7,8,9,10,11,12,13,14]; // columns A-N (1-based), including Note column
+  var lastModifiedCol = 15; // column O (1-based index), shifted due to new Note column
   
   Logger.log('Is column in watch list? ' + (colToWatch.indexOf(e.range.getColumn()) !== -1));
   Logger.log('Is row > 1? ' + (e.range.getRow() > 1));
   
   if (colToWatch.indexOf(e.range.getColumn()) !== -1 && e.range.getRow() > 1) {
-    Logger.log('Setting timestamp in column N');
+    Logger.log('Setting timestamp in column O');
     sheet.getRange(e.range.getRow(), lastModifiedCol).setValue(new Date());
   }
 }
@@ -253,18 +254,26 @@ function updateTodoistTaskFromSheet() {
 
   var updatedRowsLog = [];
   var idCol = data[0].indexOf('ID'); // 0-based
-  var dueDateCol = data[0].indexOf('Due Date'); // 0-based
-  var dueTimeCol = data[0].indexOf('Due Time'); // 0-based
-  var recurringCol = data[0].indexOf('Recurring'); // 0-based
-  var completedCol = data[0].indexOf('Completed'); // 0-based
-  var lastModifiedCol = data[0].indexOf('Last Modified'); // 0-based
   var taskNameCol = data[0].indexOf('Task');
+  var noteCol = data[0].indexOf('Note'); // Note column should be right after Task
   var taskLinkCol = data[0].indexOf('TaskLink');
   var projectNameCol = data[0].indexOf('Project Name');
+  var dueDateCol = data[0].indexOf('Due Date');
+  var dueTimeCol = data[0].indexOf('Due Time');
+  var recurringCol = data[0].indexOf('Recurring');
   var priorityCol = data[0].indexOf('Priority');
+  var completedCol = data[0].indexOf('Completed');
+  var lastModifiedCol = data[0].indexOf('Last Modified');
   var label1Col = data[0].indexOf('Label1');
   var label2Col = data[0].indexOf('Label2');
   var label3Col = data[0].indexOf('Label3');
+
+  // Log column indices for debugging
+  Logger.log('Column indices: ID=' + idCol + ', Task=' + taskNameCol + ', Note=' + noteCol + 
+             ', TaskLink=' + taskLinkCol + ', Project Name=' + projectNameCol + 
+             ', Due Date=' + dueDateCol + ', Due Time=' + dueTimeCol + ', Recurring=' + recurringCol + 
+             ', Priority=' + priorityCol + ', Completed=' + completedCol + ', Last Modified=' + lastModifiedCol + 
+             ', Label1=' + label1Col + ', Label2=' + label2Col + ', Label3=' + label3Col);
 
   var rowsToDelete = [];
   var recurringTaskUpdated = false;
@@ -362,9 +371,10 @@ function updateTodoistTaskFromSheet() {
       var label1Col = headers.indexOf('Label1');
       var label2Col = headers.indexOf('Label2');
       var label3Col = headers.indexOf('Label3');
+      var noteCol = headers.indexOf('Note');
 
       // Log column indices for debugging
-      Logger.log('Column indices: Task=' + taskNameCol + ', TaskLink=' + taskLinkCol + ', Project Name=' + projectNameCol + ', Due Date=' + dueDateCol + ', Due Time=' + dueTimeCol + ', Recurring=' + recurringCol + ', Priority=' + priorityCol + ', Completed=' + completedCol + ', Last Modified=' + lastModifiedCol + ', ID=' + idCol + ', Label1=' + label1Col + ', Label2=' + label2Col + ', Label3=' + label3Col);
+      Logger.log('Column indices: Task=' + taskNameCol + ', TaskLink=' + taskLinkCol + ', Project Name=' + projectNameCol + ', Due Date=' + dueDateCol + ', Due Time=' + dueTimeCol + ', Recurring=' + recurringCol + ', Priority=' + priorityCol + ', Completed=' + completedCol + ', Last Modified=' + lastModifiedCol + ', ID=' + idCol + ', Label1=' + label1Col + ', Label2=' + label2Col + ', Label3=' + label3Col + ', Note=' + noteCol);
 
       // Defensive: Only process if Task Name column exists
       if (taskNameCol < 0) {
@@ -427,6 +437,8 @@ function updateTodoistTaskFromSheet() {
       if (Array.isArray(labels) && labels.length > 0) {
         otherFieldsPayload.labels = labels;
       }
+      var taskNote = (noteCol >= 0 && row[noteCol] !== undefined && row[noteCol] !== null) ? row[noteCol].toString() : '';
+      Logger.log('Task Note: ' + taskNote);
       var payloadObj = {
         content: finalContent,
         // Priority 4 in the sheet means priority 1 in the API (lowest)
@@ -446,6 +458,9 @@ function updateTodoistTaskFromSheet() {
         } else {
           payloadObj.due_date = dueDate;
         }
+      }
+      if (taskNote && taskNote.trim() !== '') {
+        payloadObj.description = taskNote;
       }
       var payload = JSON.stringify(payloadObj);
       Logger.log('Creating new task | Payload: ' + payload);
@@ -590,6 +605,14 @@ function updateTodoistTaskFromSheet() {
       otherFieldsPayload.content = finalContent;
       Logger.log('TaskId: ' + taskId + ' | Content changed from "' + currentTask.content + '" to "' + finalContent + '"');
     }
+
+    // Add note/description if changed
+    var taskNote = (noteCol >= 0 && row[noteCol] !== undefined && row[noteCol] !== null) ? row[noteCol].toString() : '';
+    if (taskNote !== currentTask.description) {
+      otherFieldsPayload.description = taskNote;
+      Logger.log('TaskId: ' + taskId + ' | Description changed from "' + currentTask.description + '" to "' + taskNote + '"');
+    }
+
     if (Array.isArray(labels) && labels.length > 0) {
       otherFieldsPayload.labels = labels;
     }
@@ -664,10 +687,17 @@ function sortTasks() {
   // Get column indices
   var idCol = headers.indexOf('ID');
   var taskCol = headers.indexOf('Task');
+  var noteCol = headers.indexOf('Note');
+  var taskLinkCol = headers.indexOf('TaskLink');
   var projectNameCol = headers.indexOf('Project Name');
   var projectIdCol = headers.indexOf('Project ID');
   var dueDateCol = headers.indexOf('Due Date');
   var dueTimeCol = headers.indexOf('Due Time');
+  var label1Col = headers.indexOf('Label1');
+  
+  Logger.log('Sort column indices: ID=' + idCol + ', Task=' + taskCol + ', Note=' + noteCol + 
+             ', TaskLink=' + taskLinkCol + ', Project=' + projectNameCol + 
+             ', Due Date=' + dueDateCol + ', Time=' + dueTimeCol);
   
   // Custom project order
   var projectOrder = {
@@ -830,10 +860,16 @@ function applyTaskConditionalFormatting() {
   var priorityCol = headers.indexOf('Priority') + 1;
   var completedCol = headers.indexOf('Completed') + 1;
   var idCol = headers.indexOf('ID') + 1;
+  var taskCol = headers.indexOf('Task') + 1;
+  var noteCol = headers.indexOf('Note') + 1;
+  var taskLinkCol = headers.indexOf('TaskLink') + 1;
   var projectNameCol = headers.indexOf('Project Name') + 1;
   var recurringCol = headers.indexOf('Recurring') + 1;
   var label1Col = headers.indexOf('Label1') + 1;
-  Logger.log('Due Date col: ' + dueDateCol + ', Due Time col: ' + dueTimeCol + ', Priority col: ' + priorityCol + ', Completed col: ' + completedCol);
+
+  Logger.log('Formatting column indices: ID=' + idCol + ', Task=' + taskCol + ', Note=' + noteCol + 
+             ', TaskLink=' + taskLinkCol + ', Project=' + projectNameCol + 
+             ', Due Date=' + dueDateCol + ', Time=' + dueTimeCol);
 
   var dueDateLetter = columnToLetter(dueDateCol);
   var priorityLetter = columnToLetter(priorityCol);
@@ -850,10 +886,9 @@ function applyTaskConditionalFormatting() {
     .setFontColor('#ffffff') // White
     .setHorizontalAlignment('center');
 
-  // Auto-resize all columns to fit data, except TaskLink
-  var taskLinkCol = headers.indexOf('TaskLink') + 1;
+  // Auto-resize all columns to fit data, except TaskLink and Note
   for (var col = 1; col <= lastCol; col++) {
-    if (col !== taskLinkCol) {
+    if (col !== taskLinkCol && col !== noteCol) {
       sheet.autoResizeColumn(col);
     }
   }
@@ -970,8 +1005,7 @@ function hideIdColumns() {
   var taskIdCol = headers.indexOf('ID') + 1; // 1-based index
   var projectIdCol = headers.indexOf('Project ID') + 1; // 1-based index
 
-  Logger.log('Headers: ' + JSON.stringify(headers));
-  Logger.log('Task ID Col: ' + taskIdCol + ', Project ID Col: ' + projectIdCol);
+  Logger.log('Hide columns: Task ID Col: ' + taskIdCol + ', Project ID Col: ' + projectIdCol);
 
   if (taskIdCol > 0) {
     sheet.hideColumn(sheet.getRange(1, taskIdCol));
