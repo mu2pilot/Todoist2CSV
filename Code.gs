@@ -60,8 +60,13 @@ function updateTodoistTasks() {
     var dueDate = task.due ? task.due.date : '';
     var dueTime = '';
     if (task.due && task.due.datetime) {
-      // Extract the time part directly from the string (assume it's in local time)
-      dueTime = task.due.datetime.substring(11, 16); // HH:MM
+      var localDate = new Date(task.due.datetime);
+      dueDate = localDate.getFullYear() + '-' +
+                ('0' + (localDate.getMonth() + 1)).slice(-2) + '-' +
+                ('0' + localDate.getDate()).slice(-2);
+      var localHours = localDate.getHours();
+      var localMinutes = localDate.getMinutes();
+      dueTime = ('0' + localHours).slice(-2) + ':' + ('0' + localMinutes).slice(-2);
     }
     var recurrenceString = '';
     if (task.due && task.due.string && /^every/i.test(task.due.string.trim())) {
@@ -121,12 +126,12 @@ function updateTodoistTasks() {
 // === PUSH CHANGES TO TODOIST (SAFE, WITH PROJECT MOVE) ===
 function getCentralOffset(dateString) {
   var date = new Date(dateString);
-  // Central Time is UTC-6, but UTC-5 during DST
-  var jan = new Date(date.getFullYear(), 0, 1);
-  var jul = new Date(date.getFullYear(), 6, 1);
-  var stdTimezoneOffset = Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
-  var isDST = date.getTimezoneOffset() < stdTimezoneOffset;
-  return isDST ? '-05:00' : '-06:00';
+  // Get the local timezone offset in minutes and convert to hours
+  var offset = -date.getTimezoneOffset() / 60;
+  // Format as ±HH:00
+  var sign = offset >= 0 ? '+' : '-';
+  var hours = Math.abs(Math.floor(offset));
+  return sign + ('0' + hours).slice(-2) + ':00';
 }
 
 function formatDueTimeCell(cellValue) {
@@ -156,8 +161,8 @@ function formatDueTimeCell(cellValue) {
 
 // === URL FORMATTING FUNCTION ===
 function formatUrlToMarkdown(url, linkText) {
-  if (!url) return '';
-  // If it's a HYPERLINK formula, extract the URL and text
+  Logger.log('formatUrlToMarkdown called with url: "' + url + '", linkText: "' + linkText + '"');
+  if (!url || url === 'undefined' || url === 'null') return linkText || '';
   if (url.toString().includes('=HYPERLINK')) {
     var match = url.toString().match(/=HYPERLINK\("([^"]+)",\s*"([^"]+)"\)/);
     if (match) {
@@ -165,13 +170,13 @@ function formatUrlToMarkdown(url, linkText) {
       linkText = match[2];
     }
   }
-  url = url.toString().trim();
-  // Add https:// only if the URL doesn't have a protocol prefix
+  url = url ? url.toString().trim() : '';
   if (!url.match(/^[a-zA-Z]+:\/\//)) {
     url = 'https://' + url;
   }
-  // Always use the provided linkText (task name) if present
-  return '[' + (linkText || url.replace(/\/$/, '')) + '](' + url + ')';
+  var result = '[' + (linkText || url.replace(/\/$/, '')) + '](' + url + ')';
+  Logger.log('formatUrlToMarkdown result: "' + result + '"');
+  return (typeof result === 'string') ? result : (linkText || '');
 }
 
 // === ON EDIT TRIGGER: Automatically update 'Last Modified' column (L) ===
@@ -241,29 +246,37 @@ function getProjectIdFromName(projectName) {
 function updateTodoistTaskFromSheet() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   var data = sheet.getDataRange().getValues();
+  var headers = data[0];
   var lastSyncTime = PropertiesService.getDocumentProperties().getProperty('lastSyncTime');
   var lastSyncDate = lastSyncTime ? new Date(lastSyncTime) : null;
   Logger.log('Last sync time: ' + lastSyncTime);
 
   var updatedRowsLog = [];
-  var headers = data[0];
-  var completedCol = headers.indexOf('Completed'); // 0-based
-  var lastModifiedCol = headers.indexOf('Last Modified'); // 0-based
-  var idCol = headers.indexOf('ID'); // 0-based
-  var dueDateCol = headers.indexOf('Due Date'); // 0-based
-  var dueTimeCol = headers.indexOf('Due Time'); // 0-based
-  var recurringCol = headers.indexOf('Recurring'); // 0-based
+  var idCol = data[0].indexOf('ID'); // 0-based
+  var dueDateCol = data[0].indexOf('Due Date'); // 0-based
+  var dueTimeCol = data[0].indexOf('Due Time'); // 0-based
+  var recurringCol = data[0].indexOf('Recurring'); // 0-based
+  var completedCol = data[0].indexOf('Completed'); // 0-based
+  var lastModifiedCol = data[0].indexOf('Last Modified'); // 0-based
+  var taskNameCol = data[0].indexOf('Task');
+  var taskLinkCol = data[0].indexOf('TaskLink');
+  var projectNameCol = data[0].indexOf('Project Name');
+  var priorityCol = data[0].indexOf('Priority');
+  var label1Col = data[0].indexOf('Label1');
+  var label2Col = data[0].indexOf('Label2');
+  var label3Col = data[0].indexOf('Label3');
 
   var rowsToDelete = [];
   var recurringTaskUpdated = false;
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    // Pad row to header length for safety
     if (row.length < headers.length) {
       row = row.concat(Array(headers.length - row.length).fill(''));
     }
     var lastModified = row[lastModifiedCol];
+    Logger.log('Headers: ' + JSON.stringify(headers));
+    Logger.log('Row ' + (i+1) + ' length: ' + row.length + ', data: ' + JSON.stringify(row));
     Logger.log('Row ' + (i+1) + ' | Last Modified: ' + lastModified);
     var taskId = row[0]; // ID column (A)
     var isCompleted = row[completedCol] === true;
@@ -336,14 +349,55 @@ function updateTodoistTaskFromSheet() {
     // === NEW TASK CREATION ===
     if ((!taskId || taskId.toString().trim() === '') && lastModified) {
       Logger.log('Row ' + (i+1) + ' | Detected new task (blank ID, has Last Modified)');
-      var taskContent = row[1]; // Task (B)
-      var taskLink = row[2];    // Link (C)
+      var taskNameCol = headers.indexOf('Task');
+      var taskLinkCol = headers.indexOf('TaskLink');
+      var projectNameCol = headers.indexOf('Project Name');
+      var dueDateCol = headers.indexOf('Due Date');
+      var dueTimeCol = headers.indexOf('Due Time');
+      var recurringCol = headers.indexOf('Recurring');
+      var priorityCol = headers.indexOf('Priority');
+      var completedCol = headers.indexOf('Completed');
+      var lastModifiedCol = headers.indexOf('Last Modified');
+      var idCol = headers.indexOf('ID');
+      var label1Col = headers.indexOf('Label1');
+      var label2Col = headers.indexOf('Label2');
+      var label3Col = headers.indexOf('Label3');
+
+      // Log column indices for debugging
+      Logger.log('Column indices: Task=' + taskNameCol + ', TaskLink=' + taskLinkCol + ', Project Name=' + projectNameCol + ', Due Date=' + dueDateCol + ', Due Time=' + dueTimeCol + ', Recurring=' + recurringCol + ', Priority=' + priorityCol + ', Completed=' + completedCol + ', Last Modified=' + lastModifiedCol + ', ID=' + idCol + ', Label1=' + label1Col + ', Label2=' + label2Col + ', Label3=' + label3Col);
+
+      // Defensive: Only process if Task Name column exists
+      if (taskNameCol < 0) {
+        Logger.log('Task Name column not found. Skipping row ' + (i+1));
+        continue;
+      }
+      var taskContentRaw = row[taskNameCol];
+      Logger.log('Raw taskContent: ' + taskContentRaw);
+      if (
+        taskContentRaw === undefined ||
+        taskContentRaw === null ||
+        (typeof taskContentRaw === 'string' && taskContentRaw.trim() === '') ||
+        (typeof taskContentRaw === 'string' && taskContentRaw.trim().toLowerCase() === 'undefined') ||
+        (typeof taskContentRaw === 'string' && taskContentRaw.trim().toLowerCase() === 'null')
+      ) {
+        Logger.log('Skipping row ' + (i+1) + ' because Task Name is blank or invalid: "' + taskContentRaw + '"');
+        continue;
+      }
+      var taskContent = taskContentRaw.toString();
+      var taskLink = (taskLinkCol >= 0 && row[taskLinkCol] !== undefined && row[taskLinkCol] !== null && row[taskLinkCol] !== 'undefined' && row[taskLinkCol] !== 'null') ? row[taskLinkCol].toString() : '';
+      Logger.log('taskContent: "' + taskContent + '", taskLink: "' + taskLink + '"');
       var finalContent = taskContent;
-      if (taskLink && taskLink.toString().trim() !== '') {
+      if (typeof taskLink === 'string' && taskLink.trim() !== '') {
         finalContent = formatUrlToMarkdown(taskLink, taskContent);
       }
+      Logger.log('finalContent: "' + finalContent + '"');
+      // If Task Name is blank, log error and skip row
+      if (!finalContent || finalContent.trim() === '') {
+        Logger.log('ERROR: Task Name is blank for row ' + (i+1) + '. Skipping this row.');
+        continue;
+      }
       
-      var projectName = row[3];   // Project Name column (D)
+      var projectName = row[projectNameCol];   // Project Name column (D)
       var projectId = null;
       if (projectName && projectName.toString().trim() !== '') {
         projectId = getProjectIdFromName(projectName);
@@ -353,24 +407,26 @@ function updateTodoistTaskFromSheet() {
         }
       }
       
-      var dueDate = row[5];     // Due Date (F)
+      var dueDate = row[dueDateCol];     // Due Date (F)
       if (dueDate instanceof Date) {
         dueDate = dueDate.getFullYear() + '-' +
                   ('0' + (dueDate.getMonth() + 1)).slice(-2) + '-' +
                   ('0' + dueDate.getDate()).slice(-2);
       }
-      var dueTime = formatDueTimeCell(row[6]); // Due Time (G)
+      var dueTime = formatDueTimeCell(row[dueTimeCol]); // Due Time (G)
       // Label handling using header-based indexing
-      var label1Col = headers.indexOf('Label1');
-      var label2Col = headers.indexOf('Label2');
-      var label3Col = headers.indexOf('Label3');
-      var labelCols = [label1Col, label2Col, label3Col];
       var labels = [];
+      var labelCols = [label1Col, label2Col, label3Col];
       labelCols.forEach(function(colIdx) {
-        if (row[colIdx] !== undefined && row[colIdx] !== null && row[colIdx].toString().trim() !== '') {
+        if (colIdx >= 0 && row[colIdx] !== undefined && row[colIdx] !== null && row[colIdx].toString().trim() !== '') {
           labels.push(row[colIdx]);
         }
       });
+      Logger.log('labelCols: ' + JSON.stringify(labelCols));
+      Logger.log('labels: ' + JSON.stringify(labels));
+      if (Array.isArray(labels) && labels.length > 0) {
+        otherFieldsPayload.labels = labels;
+      }
       var payloadObj = {
         content: finalContent,
         // Priority 4 in the sheet means priority 1 in the API (lowest)
@@ -384,11 +440,9 @@ function updateTodoistTaskFromSheet() {
       }
       if (dueDate && dueDate.toString().trim() !== '') {
         if (dueTime && dueTime.toString().trim() !== '') {
-          var offset = getCentralOffset(dueDate);
-          var timeString = dueTime.length === 5 ? dueTime : ('0' + dueTime).slice(-5);
-          var isoString = dueDate + 'T' + timeString + ':00' + offset;
-          Logger.log('Creating new task | due_datetime: ' + isoString);
-          payloadObj.due_datetime = isoString;
+          // Use the date and time as-is, no timezone or offset
+          var dueDatetime = dueDate + 'T' + dueTime;
+          payloadObj.due_datetime = dueDatetime;
         } else {
           payloadObj.due_date = dueDate;
         }
@@ -438,8 +492,8 @@ function updateTodoistTaskFromSheet() {
     Logger.log('Row ' + (i+1) + ' will be updated');
 
     taskId = row[0];      // ID column (A)
-    projectName = row[3];   // Project Name column (D)
-    dueDate = row[5];     // Due Date column (F)
+    projectName = row[projectNameCol];   // Project Name column (D)
+    dueDate = row[dueDateCol];     // Due Date column (F)
     Logger.log('TaskId: ' + taskId + ' | Raw Due Date value: ' + dueDate);
     if (dueDate instanceof Date) {
       dueDate = dueDate.getFullYear() + '-' +
@@ -447,10 +501,10 @@ function updateTodoistTaskFromSheet() {
                 ('0' + dueDate.getDate()).slice(-2);
       Logger.log('TaskId: ' + taskId + ' | Formatted Due Date: ' + dueDate);
     }
-    Logger.log('TaskId: ' + taskId + ' | Raw Due Time value: ' + row[6]);
-    dueTime = formatDueTimeCell(row[6]);     // Due Time column (G)
+    Logger.log('TaskId: ' + taskId + ' | Raw Due Time value: ' + row[dueTimeCol]);
+    dueTime = formatDueTimeCell(row[dueTimeCol]);     // Due Time column (G)
     Logger.log('TaskId: ' + taskId + ' | Formatted Due Time: ' + dueTime);
-    var uiPriority = row[7];  // Priority column (H)
+    var uiPriority = row[priorityCol];  // Priority column (H)
 
     // Update project if name changed
     var projectId = null;
@@ -504,81 +558,54 @@ function updateTodoistTaskFromSheet() {
       Logger.log('TaskId: ' + taskId + ' | Project ID after Sync API move: ' + verifyTask.project_id);
     }
     
-    // Step 2: Update other fields (if any) using REST API
-    var payloadObj = {};
-    
-    // Update task content (name) and link
-    var taskContent = row[1]; // Task (B)
-    var taskLink = row[2];    // Link (C)
-    var finalContent = taskContent;
-    if (taskLink && taskLink.toString().trim() !== '') {
-      finalContent = formatUrlToMarkdown(taskLink, taskContent);
+    // Set finalContent for existing task update
+    var taskContent = row[taskNameCol];
+    var taskLink = (taskLinkCol >= 0 && row[taskLinkCol] !== undefined && row[taskLinkCol] !== null && row[taskLinkCol] !== 'undefined' && row[taskLinkCol] !== 'null') ? row[taskLinkCol].toString() : '';
+    var finalContent = (taskContent !== undefined && taskContent !== null) ? taskContent.toString() : '';
+    if (typeof taskLink === 'string' && taskLink.trim() !== '') {
+      finalContent = formatUrlToMarkdown(taskLink, finalContent);
     }
-    
-    payloadObj.content = finalContent;
-    
-    // Label handling using header-based indexing
-    var label1Col = headers.indexOf('Label1');
-    var label2Col = headers.indexOf('Label2');
-    var label3Col = headers.indexOf('Label3');
-    var labelCols = [label1Col, label2Col, label3Col];
+    Logger.log('finalContent (update block): "' + finalContent + '"');
+    // If Task Name is blank, log error and skip row
+    if (!finalContent || finalContent.trim() === '') {
+      Logger.log('ERROR: Task Name is blank for row ' + (i+1) + '. Skipping this row.');
+      continue;
+    }
+
+    // Build labels array for update block
     var labels = [];
+    var labelCols = [label1Col, label2Col, label3Col];
     labelCols.forEach(function(colIdx) {
-      if (row[colIdx] !== undefined && row[colIdx] !== null && row[colIdx].toString().trim() !== '') {
+      if (colIdx >= 0 && row[colIdx] !== undefined && row[colIdx] !== null && row[colIdx].toString().trim() !== '') {
         labels.push(row[colIdx]);
       }
     });
-    if (labels.length > 0) {
-      payloadObj.labels = labels;
-    }
-
-    // First, update just the due date/recurrence if needed
-    var recurrenceCell = row[recurringCol] ? row[recurringCol].toString().trim() : '';
-    var dueDatePayload = {};
-    if (recurrenceCell && recurrenceCell.toLowerCase().startsWith('every')) {
-      // If recurrence, build due_string (append time if present and not already in string)
-      var dueString = recurrenceCell;
-      if (dueTime && dueTime !== '' && !dueString.match(/\d{1,2}:\d{2}/)) {
-        dueString += ' at ' + dueTime;
-      }
-      dueDatePayload.due_string = dueString;
-      Logger.log('TaskId: ' + taskId + ' | Sending only due_string for recurrence: ' + dueString);
-    } else if (dueDate && dueDate.toString().trim() !== '') {
-      // No recurrence, use due_date/due_datetime
-      dueDatePayload.due_date = dueDate;
-      if (dueTime && dueTime !== '') {
-        var offset = getCentralOffset(dueDate);
-        var timeString = dueTime.length === 5 ? dueTime : ('0' + dueTime).slice(-5);
-        var isoString = dueDate + 'T' + timeString + ':00' + offset;
-        dueDatePayload.due_datetime = isoString;
-        delete dueDatePayload.due_date;
-      }
-      Logger.log('TaskId: ' + taskId + ' | Sending due_date/due_datetime: ' + JSON.stringify(dueDatePayload));
-    }
-    if (Object.keys(dueDatePayload).length > 0) {
-      var dueDateUrl = 'https://api.todoist.com/rest/v2/tasks/' + taskId;
-      var dueDateOptions = {
-        method: 'post',
-        contentType: 'application/json',
-        headers: { 'Authorization': 'Bearer ' + TODOIST_API_TOKEN, 'X-Request-Id': Utilities.getUuid() },
-        payload: JSON.stringify(dueDatePayload),
-        muteHttpExceptions: true
-      };
-      Logger.log('TaskId: ' + taskId + ' | Due date/time/recurrence payload: ' + JSON.stringify(dueDatePayload));
-      var dueDateResponse = UrlFetchApp.fetch(dueDateUrl, dueDateOptions);
-      Logger.log('TaskId: ' + taskId + ' | Due date update response code: ' + dueDateResponse.getResponseCode() + ' | response body: ' + dueDateResponse.getContentText());
-    }
+    Logger.log('labelCols (update block): ' + JSON.stringify(labelCols));
+    Logger.log('labels (update block): ' + JSON.stringify(labels));
 
     // Then update other fields if needed
     var otherFieldsPayload = {};
-    if (finalContent !== taskContent) {
+    // Always include content if task content or link has changed
+    if (finalContent !== currentTask.content) {
       otherFieldsPayload.content = finalContent;
+      Logger.log('TaskId: ' + taskId + ' | Content changed from "' + currentTask.content + '" to "' + finalContent + '"');
     }
-    if (labels.length > 0) {
+    if (Array.isArray(labels) && labels.length > 0) {
       otherFieldsPayload.labels = labels;
     }
     if (uiPriority && uiPriority.toString().trim() !== '') {
       otherFieldsPayload.priority = 5 - Number(uiPriority);
+    }
+
+    // Update due date/time if changed
+    if (dueDate && dueDate.toString().trim() !== '') {
+      if (dueTime && dueTime.toString().trim() !== '') {
+        // Use the date and time as-is, no timezone or offset
+        var dueDatetime = dueDate + 'T' + dueTime;
+        otherFieldsPayload.due_datetime = dueDatetime;
+      } else {
+        otherFieldsPayload.due_date = dueDate;
+      }
     }
 
     if (Object.keys(otherFieldsPayload).length > 0) {
@@ -734,12 +761,18 @@ function sortTasks() {
     return getProjectOrder(aProject) - getProjectOrder(bProject);
   }
   
-  // Sort function for tasks without due dates or with due dates > 7 days out
+  // Sort function for tasks without due dates or with due dates > 7 days
   function sortByProjectDueDateTimeName(a, b) {
     var aProject = a[projectNameCol];
     var bProject = b[projectNameCol];
     var projectDiff = getProjectOrder(aProject) - getProjectOrder(bProject);
     if (projectDiff !== 0) return projectDiff;
+
+    var label1Col = headers.indexOf('Label1');
+    var aLabel1 = (label1Col >= 0 && a[label1Col]) ? a[label1Col] : '';
+    var bLabel1 = (label1Col >= 0 && b[label1Col]) ? b[label1Col] : '';
+    var labelDiff = aLabel1.localeCompare(bLabel1);
+    if (labelDiff !== 0) return labelDiff;
 
     var aDue = getTaskDueDateTime(a);
     var bDue = getTaskDueDateTime(b);
