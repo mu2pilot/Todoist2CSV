@@ -11,7 +11,138 @@ function onOpen() {
     .addItem('Sort Tasks', 'sortTasks')
     .addSeparator()
     .addItem('Apply Colorful Formatting', 'applyTaskConditionalFormatting')
+    .addSeparator()
+    .addItem('Show All Labels', 'showAllRows')
+    .addItem('Select Labels...', 'showLabelFilterDialog')
     .addToUi();
+}
+
+// === LABEL FILTERING FUNCTIONS ===
+function showAllRows() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.showRows(2, lastRow - 1);
+  }
+}
+
+function showLabelFilterDialog() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  
+  // Get column indices for labels
+  var label1Col = headers.indexOf('Label1');
+  var label2Col = headers.indexOf('Label2');
+  var label3Col = headers.indexOf('Label3');
+  
+  // Get all unique labels from the sheet
+  var allLabels = new Set();
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    if (row[label1Col]) allLabels.add(row[label1Col]);
+    if (row[label2Col]) allLabels.add(row[label2Col]);
+    if (row[label3Col]) allLabels.add(row[label3Col]);
+  }
+  
+  // Convert Set to Array and sort
+  var labelArray = Array.from(allLabels).sort();
+  
+  // Create HTML for the dialog
+  var html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <base target="_top">
+        <style>
+          body { font-family: Arial, sans-serif; margin: 20px; }
+          .checkbox-container { margin-bottom: 10px; }
+          .button-container { margin-top: 20px; text-align: center; }
+          .submit-btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+          }
+          .submit-btn:hover { background-color: #45a049; }
+        </style>
+      </head>
+      <body>
+        <form id="labelForm">
+          <div class="checkbox-container">
+            ${labelArray.map(label => 
+              `<div>
+                <input type="checkbox" name="labels" value="${label}" id="${label}">
+                <label for="${label}">${label}</label>
+              </div>`
+            ).join('')}
+          </div>
+          <div class="button-container">
+            <input type="submit" value="Apply Filter" class="submit-btn">
+          </div>
+        </form>
+        <script>
+          document.getElementById('labelForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            var selectedLabels = Array.from(document.querySelectorAll('input[name="labels"]:checked'))
+              .map(cb => cb.value);
+            google.script.run
+              .withSuccessHandler(function() {
+                google.script.host.close();
+              })
+              .filterBySelectedLabels(selectedLabels);
+          });
+        </script>
+      </body>
+    </html>
+  `;
+  
+  var htmlOutput = HtmlService.createHtmlOutput(html)
+    .setWidth(300)
+    .setHeight(400)
+    .setTitle('Select Labels to Show');
+  
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, 'Select Labels to Show');
+}
+
+function filterBySelectedLabels(selectedLabels) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  
+  // Get column indices for labels
+  var label1Col = headers.indexOf('Label1');
+  var label2Col = headers.indexOf('Label2');
+  var label3Col = headers.indexOf('Label3');
+  
+  if (selectedLabels.length === 0) {
+    showAllRows();
+    return;
+  }
+  
+  // Hide all rows first
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.hideRows(2, lastRow - 1);
+  }
+  
+  // Show only rows that have any of the selected labels
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var rowLabels = [
+      row[label1Col],
+      row[label2Col],
+      row[label3Col]
+    ].filter(function(label) { return label; });
+    
+    // If row has any of the selected labels, show it
+    if (rowLabels.some(function(label) { return selectedLabels.includes(label); })) {
+      sheet.showRows(i + 1);
+    }
+  }
 }
 
 // === FETCH TASKS FROM TODOIST ===
@@ -434,11 +565,9 @@ function updateTodoistTaskFromSheet() {
       });
       Logger.log('labelCols: ' + JSON.stringify(labelCols));
       Logger.log('labels: ' + JSON.stringify(labels));
-      if (Array.isArray(labels) && labels.length > 0) {
-        otherFieldsPayload.labels = labels;
-      }
       var taskNote = (noteCol >= 0 && row[noteCol] !== undefined && row[noteCol] !== null) ? row[noteCol].toString() : '';
       Logger.log('Task Note: ' + taskNote);
+      // Define payloadObj before assigning any properties
       var payloadObj = {
         content: finalContent,
         // Priority 4 in the sheet means priority 1 in the API (lowest)
@@ -665,10 +794,11 @@ function updateTodoistTaskFromSheet() {
       sheet.deleteRow(rowIdx);
     });
   }
-  // Only resort if a recurring task was updated
-  if (recurringTaskUpdated) {
-    sortTasks();
-  }
+ // Automatically sort and apply formatting after update
+  sortTasks();
+  applyTaskConditionalFormatting();
+  hideIdColumns();
+  
   // Update last sync time
   var now = new Date().toISOString();
   PropertiesService.getDocumentProperties().setProperty('lastSyncTime', now);
@@ -683,7 +813,7 @@ function sortTasks() {
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
   var tasks = data.slice(1); // Remove header row
-  
+
   // Get column indices
   var idCol = headers.indexOf('ID');
   var taskCol = headers.indexOf('Task');
@@ -694,12 +824,12 @@ function sortTasks() {
   var dueDateCol = headers.indexOf('Due Date');
   var dueTimeCol = headers.indexOf('Due Time');
   var label1Col = headers.indexOf('Label1');
-  
+
   Logger.log('Sort column indices: ID=' + idCol + ', Task=' + taskCol + ', Note=' + noteCol + 
              ', TaskLink=' + taskLinkCol + ', Project=' + projectNameCol + 
              ', Due Date=' + dueDateCol + ', Time=' + dueTimeCol);
-  
-  // Custom project order
+
+  // Custom project order for Group 4
   var projectOrder = {
     'Inbox': 0,
     'Focus': 1,
@@ -710,131 +840,103 @@ function sortTasks() {
     'Backburner': 6,
     'Reference': 7
   };
-  
+
   // Get current time in Central Time
   var now = new Date();
+  var todayStr = now.getFullYear() + '-' + ('0' + (now.getMonth() + 1)).slice(-2) + '-' + ('0' + now.getDate()).slice(-2);
   var sevenDaysFromNow = new Date(now.getTime() + (7 * 24 * 60 * 60 * 1000));
-  
-  // Helper function to get task due datetime
-  function getTaskDueDateTime(task) {
+
+  // Helper function to get task due date as a string (YYYY-MM-DD)
+  function getTaskDueDateString(task) {
     var dueDate = task[dueDateCol];
-    var dueTime = task[dueTimeCol];
-    if (!dueDate) return null;
-    var date = new Date(dueDate);
-    if (!dueTime) return date;
-    if (typeof dueTime === 'string') {
-      var parts = dueTime.split(':');
-      if (parts.length === 2) {
-        var hours = parseInt(parts[0], 10);
-        var minutes = parseInt(parts[1], 10);
-        if (!isNaN(hours) && !isNaN(minutes)) {
-          date.setHours(hours, minutes, 0, 0);
-          return date;
-        }
-      }
-      // If string but not HH:MM, ignore time
-      return date;
-    } else if (typeof dueTime === 'number') {
-      // Google Sheets may store time as a fraction of a day
-      var totalMinutes = Math.round(dueTime * 24 * 60);
-      var hours = Math.floor(totalMinutes / 60);
-      var minutes = totalMinutes % 60;
-      date.setHours(hours, minutes, 0, 0);
-      return date;
-    } else if (dueTime instanceof Date) {
-      date.setHours(dueTime.getHours(), dueTime.getMinutes(), 0, 0);
-      return date;
+    if (!dueDate) return '';
+    if (dueDate instanceof Date) {
+      return dueDate.getFullYear() + '-' + ('0' + (dueDate.getMonth() + 1)).slice(-2) + '-' + ('0' + dueDate.getDate()).slice(-2);
     }
-    // If not recognized, just return date
-    return date;
+    return dueDate;
   }
-  
+
   // Helper function to get project order
   function getProjectOrder(projectName) {
     return projectOrder[projectName] !== undefined ? projectOrder[projectName] : 999;
   }
-  
-  // Sort tasks into groups
+
+  // Sort function for Groups 1, 2, 3: by due date (date only), then task name
+  function sortByDueDateThenTask(a, b) {
+    var aDue = getTaskDueDateString(a);
+    var bDue = getTaskDueDateString(b);
+    if (aDue && bDue && aDue !== bDue) {
+      return aDue.localeCompare(bDue);
+    }
+    // If due dates are equal or missing, sort alphabetically by task name
+    var aTask = a[taskCol] || '';
+    var bTask = b[taskCol] || '';
+    return aTask.localeCompare(bTask);
+  }
+
+  // Sort function for Group 4: by project order, then Label1, then due date (date only), then task name
+  function sortByProjectLabelDueDateTask(a, b) {
+    var aProject = a[projectNameCol];
+    var bProject = b[projectNameCol];
+    var projectDiff = getProjectOrder(aProject) - getProjectOrder(bProject);
+    if (projectDiff !== 0) return projectDiff;
+    var aLabel1 = (label1Col >= 0 && a[label1Col]) ? a[label1Col] : '';
+    var bLabel1 = (label1Col >= 0 && b[label1Col]) ? b[label1Col] : '';
+    var labelDiff = aLabel1.localeCompare(bLabel1);
+    if (labelDiff !== 0) return labelDiff;
+    var aDue = getTaskDueDateString(a);
+    var bDue = getTaskDueDateString(b);
+    if (aDue && bDue && aDue !== bDue) {
+      return aDue.localeCompare(bDue);
+    }
+    var aTask = a[taskCol] || '';
+    var bTask = b[taskCol] || '';
+    return aTask.localeCompare(bTask);
+  }
+
+  // Group tasks
   var overdueTasks = [];
+  var todayTasks = [];
   var upcomingTasks = [];
   var otherTasks = [];
-  
+
+  // Get today's date string and 7 days from today string
+  var todayDate = new Date();
+  var todayDateStr = todayDate.getFullYear() + '-' + ('0' + (todayDate.getMonth() + 1)).slice(-2) + '-' + ('0' + todayDate.getDate()).slice(-2);
+  var sevenDaysFromNowDate = new Date(todayDate.getTime() + (7 * 24 * 60 * 60 * 1000));
+  var sevenDaysFromNowStr = sevenDaysFromNowDate.getFullYear() + '-' + ('0' + (sevenDaysFromNowDate.getMonth() + 1)).slice(-2) + '-' + ('0' + sevenDaysFromNowDate.getDate()).slice(-2);
+
   tasks.forEach(function(task) {
-    var dueDateTime = getTaskDueDateTime(task);
-    if (!dueDateTime) {
-      otherTasks.push(task);
-      return;
-    }
-    
-    if (dueDateTime < now) {
+    var dueDateStr = getTaskDueDateString(task);
+    var projectName = task[projectNameCol];
+    var isTodayProject = (projectName && projectName.trim().toLowerCase() === 'today');
+    var isDueToday = (dueDateStr && dueDateStr === todayDateStr);
+    if (dueDateStr && dueDateStr < todayDateStr) {
       overdueTasks.push(task);
-    } else if (dueDateTime <= sevenDaysFromNow) {
+    } else if (isTodayProject || isDueToday) {
+      todayTasks.push(task);
+    } else if (dueDateStr && dueDateStr > todayDateStr && dueDateStr <= sevenDaysFromNowStr) {
       upcomingTasks.push(task);
     } else {
       otherTasks.push(task);
     }
   });
-  
-  // Sort function for tasks with due dates
-  function sortByDueDate(a, b) {
-    var aDue = getTaskDueDateTime(a);
-    var bDue = getTaskDueDateTime(b);
-    
-    // First by due date
-    if (aDue.getTime() !== bDue.getTime()) {
-      return aDue.getTime() - bDue.getTime();
-    }
-    
-    // Then by project
-    var aProject = a[projectNameCol];
-    var bProject = b[projectNameCol];
-    return getProjectOrder(aProject) - getProjectOrder(bProject);
-  }
-  
-  // Sort function for tasks without due dates or with due dates > 7 days
-  function sortByProjectDueDateTimeName(a, b) {
-    var aProject = a[projectNameCol];
-    var bProject = b[projectNameCol];
-    var projectDiff = getProjectOrder(aProject) - getProjectOrder(bProject);
-    if (projectDiff !== 0) return projectDiff;
 
-    var label1Col = headers.indexOf('Label1');
-    var aLabel1 = (label1Col >= 0 && a[label1Col]) ? a[label1Col] : '';
-    var bLabel1 = (label1Col >= 0 && b[label1Col]) ? b[label1Col] : '';
-    var labelDiff = aLabel1.localeCompare(bLabel1);
-    if (labelDiff !== 0) return labelDiff;
+  overdueTasks.sort(sortByDueDateThenTask);
+  todayTasks.sort(sortByDueDateThenTask);
+  upcomingTasks.sort(sortByDueDateThenTask);
+  otherTasks.sort(sortByProjectLabelDueDateTask);
 
-    var aDue = getTaskDueDateTime(a);
-    var bDue = getTaskDueDateTime(b);
-    var aHasDue = !!aDue && a[dueDateCol];
-    var bHasDue = !!bDue && b[dueDateCol];
-    if (aHasDue && bHasDue) {
-      if (aDue.getTime() !== bDue.getTime()) {
-        return aDue.getTime() - bDue.getTime();
-      }
-    } else if (aHasDue && !bHasDue) {
-      return -1;
-    } else if (!aHasDue && bHasDue) {
-      return 1;
-    }
-    // If both have no due date or same due date/time, sort alphabetically by task name
-    return a[taskCol].localeCompare(b[taskCol]);
-  }
-  
-  // Sort each group
-  overdueTasks.sort(sortByDueDate);
-  upcomingTasks.sort(sortByDueDate);
-  otherTasks.sort(sortByProjectDueDateTimeName);
-  
-  // Combine all tasks
-  var sortedTasks = [...overdueTasks, ...upcomingTasks, ...otherTasks];
-  
+  // Combine all tasks in the new order
+  var sortedTasks = [...overdueTasks, ...todayTasks, ...upcomingTasks, ...otherTasks];
+
   // Write back to sheet
   var output = [headers, ...sortedTasks];
   sheet.getRange(1, 1, output.length, output[0].length).setValues(output);
-  
+
   return {
     overdue: overdueTasks.length,
+    today: todayTasks.length,
     upcoming: upcomingTasks.length,
     other: otherTasks.length
   };
@@ -875,6 +977,7 @@ function applyTaskConditionalFormatting() {
   var priorityLetter = columnToLetter(priorityCol);
   var completedLetter = columnToLetter(completedCol);
   var idLetter = columnToLetter(idCol);
+  var projectNameLetter = columnToLetter(projectNameCol);
 
   var range = sheet.getRange(2, 1, lastRow - 1, lastCol); // Exclude header
   Logger.log('Applying formatting to range: ' + range.getA1Notation());
@@ -917,7 +1020,7 @@ function applyTaskConditionalFormatting() {
     .setRanges([range])
     .build());
 
-  // Overdue: Red background, white bold text
+  // Overdue: Red background, white bold text (Group 1)
   rules.push(SpreadsheetApp.newConditionalFormatRule()
     .whenFormulaSatisfied('=AND($' + dueDateLetter + '2 <> "", $' + dueDateLetter + '2 < TODAY())')
     .setBackground('#f4cccc')
@@ -926,20 +1029,20 @@ function applyTaskConditionalFormatting() {
     .setRanges([range])
     .build());
 
-  // Due Today: Orange/Yellow background, bold text
+  // Today: Green background, bold text, includes Project Name 'Today' (Group 2)
   rules.push(SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied('=$' + dueDateLetter + '2 = TODAY()')
-    .setBackground('#ffe599')
-    .setFontColor('#b45f06')
+    .whenFormulaSatisfied('=OR($' + dueDateLetter + '2 = TODAY(), LOWER($' + projectNameLetter + '2) = "today")')
+    .setBackground('#d9ead3')
+    .setFontColor('#274e13')
     .setBold(true)
     .setRanges([range])
     .build());
 
-  // Due in next 7 days: Green background, bold text
+  // Upcoming: Yellow background, bold text (Group 3)
   rules.push(SpreadsheetApp.newConditionalFormatRule()
     .whenFormulaSatisfied('=AND($' + dueDateLetter + '2 > TODAY(), $' + dueDateLetter + '2 <= TODAY()+7)')
-    .setBackground('#d9ead3')
-    .setFontColor('#274e13')
+    .setBackground('#ffe599')
+    .setFontColor('#b45f06')
     .setBold(true)
     .setRanges([range])
     .build());
